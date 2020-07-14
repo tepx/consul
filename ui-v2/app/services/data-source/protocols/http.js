@@ -64,6 +64,7 @@ export default Service.extend({
             break;
         }
         break;
+      case 'kv':
       case 'intention':
         // TODO: Are we going to need to encode/decode here...?
         slug = rest.join('/');
