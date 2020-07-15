@@ -35,7 +35,6 @@ ingressGateways:
   enabled: true
   gateways:
     - name: ingress-gateway
-      replicas: 2
       service:
        type: LoadBalancer
 ```
@@ -51,7 +50,8 @@ Values in this section override the values from the defaults stanza for the give
 the annotations from the defaults stanza will be *appended* to any user-defined annotations defined in the gateways stanza rather than being overridden.
 Please refer to the ingress gateway configuration [documentation](/docs/k8s/helm#v-ingressgateways-defaults) for a detailed explanation of each option.
 
--> *Note*: Make sure any ports that will be used as listeners in the ingress gateway's Consul config entry are included in the `ports` object for each gateway.
+-> *Note*: Make sure any ports that will be used as listeners in the ingress gateway's Consul config entry are included
+in the `ports` object for each gateway. By default ports 8080 and 8443 are exposed for traffic.
 
 ## Deploying the helm chart
 
@@ -93,7 +93,7 @@ $ export CONSUL_HTTP_SSL_VERIFY=false
 ### Submitting an Ingress Gateway configuration entry
 
 Now that you have access to a Consul server through the forwarded port and you have the Consul CLI configured locally, you are able to submit an ingress gateway configuration entry.
-Here is an ingress gateway configuration.
+Here is an ingress gateway [configuration](https://www.consul.io/docs/agent/config-entries/ingress-gateway).
 
 ```hcl
 Kind = "ingress-gateway"
@@ -118,7 +118,8 @@ Submit the ingress gateway configuration with the Consul CLI using this command.
 $ consul config write ingress-gateway.hcl
 ```
 
-You can confirm the ingress gateways have been configured as expected by looking at the Consul UI: [http://localhost:8500/ui/dc1/services/ingress-gateway/](http://localhost:8500/ui/dc1/services/ingress-gateway/).
+You can confirm the ingress gateways have been configured as expected by viewing the ingress-gateway service instances
+in the Consul UI: [http://localhost:8500/ui/dc1/services/ingress-gateway/](http://localhost:8500/ui/dc1/services/ingress-gateway/).
 
 If TLS is enabled, use [https://localhost:8501/ui/dc1/services/ingress-gateway/](https://localhost:8501/ui/dc1/services/ingress-gateway/).
 
@@ -195,7 +196,6 @@ ingressGateways:
   enabled: false # Set to false
   gateways:
     - name: ingress-gateway
-      replicas: 2
       service:
        type: LoadBalancer
 ```
