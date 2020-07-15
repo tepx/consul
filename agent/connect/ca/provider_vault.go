@@ -8,9 +8,13 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/hashicorp/consul/agent/connect"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/logging"
+	"github.com/hashicorp/go-hclog"
 	vaultapi "github.com/hashicorp/vault/api"
 	"github.com/mitchellh/mapstructure"
 )
@@ -27,6 +31,16 @@ type VaultProvider struct {
 	clusterID                    string
 	spiffeID                     *connect.SpiffeIDSigning
 	setupIntermediatePKIPathDone bool
+	logger                       hclog.Logger
+	done                         chan struct{}
+	once                         sync.Once
+}
+
+func (v *VaultProvider) SetLogger(logger hclog.Logger) {
+	v.logger = logger.
+		ResetNamed(logging.Connect).
+		Named(logging.CA).
+		Named(logging.Vault)
 }
 
 func vaultTLSConfig(config *structs.VaultCAProviderConfig) *vaultapi.TLSConfig {
@@ -65,6 +79,11 @@ func (v *VaultProvider) Configure(cfg ProviderConfig) error {
 	v.isPrimary = cfg.IsPrimary
 	v.clusterID = cfg.ClusterID
 	v.spiffeID = connect.SpiffeIDSigningForCluster(&structs.CAConfiguration{ClusterID: v.clusterID})
+
+	// TODO(tpeoples@xevo.com): Add a config element to gate this behevior
+	if err := v.autoRenewToken(); err != nil {
+		v.logger.Warn("vault token will not be renewed", "error", err)
+	}
 
 	return nil
 }
@@ -431,6 +450,7 @@ func (c *VaultProvider) SupportsCrossSigning() (bool, error) {
 // this down and recreate it on small config changes because the intermediate
 // certs get bundled with the leaf certs, so there's no cost to the CA changing.
 func (v *VaultProvider) Cleanup() error {
+	v.stopTokenRenewal()
 	return v.client.Sys().Unmount(v.config.IntermediatePKIPath)
 }
 
@@ -477,4 +497,96 @@ func ParseVaultCAConfig(raw map[string]interface{}) (*structs.VaultCAProviderCon
 	}
 
 	return &config, nil
+}
+
+func (v *VaultProvider) autoRenewToken() error {
+	// Should we only attempt renewal when v.isPrimary is true?
+	var ta *vaultapi.TokenAuth
+	if auth := v.client.Auth(); auth != nil {
+		ta = auth.Token()
+	}
+
+	if ta == nil {
+		return fmt.Errorf("cannot extract TokenAuth from token")
+	}
+
+	sec, err := ta.LookupSelf()
+	if err != nil {
+		return fmt.Errorf("cannot discern vault secret from token: %w", err)
+	}
+
+	renewer, err := v.client.NewRenewer(&vaultapi.RenewerInput{Secret: sec})
+	if err != nil {
+		return fmt.Errorf("cannot create secret renewer: %w", err)
+	}
+
+	v.done = make(chan struct{})
+
+	go func() {
+		go renewer.Renew()
+		defer renewer.Stop()
+		defer func() { v.done = nil }()
+
+		for {
+			var output *vaultapi.RenewOutput
+
+			select {
+			case <-v.done:
+				return
+			case err := <-renewer.DoneCh():
+				if err != nil {
+					v.logger.Error("Vault token renewal aborted with error", "error", err)
+				} else {
+					v.logger.Warn("Vault token renewal self terminated without error")
+				}
+				return
+			case output = <-renewer.RenewCh():
+			}
+
+			if output == nil {
+				v.logger.Warn("Vault RenewOutput is nil!")
+				continue
+			}
+
+			if output.Secret == nil {
+				v.logger.Warn("Renewed Token Secret is nil!")
+				continue
+			}
+
+			tok, err := output.Secret.TokenID()
+			if err != nil {
+				v.logger.Warn("Cannot retrieve token from renewed secret", "error", err)
+				continue
+			}
+
+			v.client.SetToken(tok)
+
+			if d, err := output.Secret.TokenTTL(); err == nil {
+				v.logger.Info(fmt.Sprintf("Vault token successfully renewed until: %s", time.Now().Add(d).Format(time.RFC3339)))
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (v *VaultProvider) stopTokenRenewal() {
+	var try, did bool
+	v.once.Do(func() {
+		try = true
+		if v.done != nil {
+			v.logger.Debug("Stopping token renewal")
+			close(v.done)
+			did = true
+		}
+	})
+
+	if did {
+		v.logger.Info("Token renewal stopped")
+		return
+	}
+
+	if !try {
+		v.logger.Warn("Duplicate token renewal stoppage abated")
+	}
 }
